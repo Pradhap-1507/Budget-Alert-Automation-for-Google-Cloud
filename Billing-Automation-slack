@@ -11,7 +11,7 @@ SLACK_WEBHOOK_URL = "xxxxx" URL of Slack_WEBHOOK
 THRESHOLDS = [50, 70, 85, 100, 125, 150, 175, 200]
 
 # Initialize Google Cloud Storage client
-BUCKET_NAME = "name of bucket"  # Update the name 
+BUCKET_NAME = "name of bucket"  # Update the bucket name 
 storage_client = storage.Client()
 
 def get_triggered_thresholds():
@@ -72,7 +72,7 @@ def billing_alert_to_slack(data, context):
         event = json.loads(pubsub_message)
 
         # Set Project name manually
-        project_id = "project name"
+        project_id = "project name" Mention your project ID or Name
 
         # Extract cost and budget details
         cost_amount = float(event.get("costAmount", 0))
