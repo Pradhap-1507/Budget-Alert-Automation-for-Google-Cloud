@@ -1,0 +1,127 @@
+import base64
+import json
+import requests
+from datetime import datetime
+from google.cloud import storage
+
+# Your Slack Webhook URL
+SLACK_WEBHOOK_URL = "xxxxx"
+
+# Threshold percentages
+THRESHOLDS = [50, 70, 85, 100, 125, 150, 175, 200]
+
+# Initialize Google Cloud Storage client
+BUCKET_NAME = "name of bucket"  # Update the name 
+storage_client = storage.Client()
+
+def get_triggered_thresholds():
+    """Retrieve the list of triggered thresholds from Cloud Storage."""
+    try:
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob("triggered_thresholds.json")
+        if blob.exists():
+            data = blob.download_as_text()
+            return json.loads(data)
+        return {}  # Return empty dict if file doesn't exist
+    except Exception as e:
+        print(f"Error fetching triggered thresholds: {e}")
+        return {}
+
+def update_triggered_thresholds(state):
+    """Update the list of triggered thresholds in Cloud Storage."""
+    try:
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob("triggered_thresholds.json")
+        blob.upload_from_string(json.dumps(state))
+    except Exception as e:
+        print(f"Error updating triggered thresholds: {e}")
+
+def reset_monthly_state_if_new_month():
+    """Reset the state file if a new month has begun."""
+    # Get the current month
+    current_month = datetime.utcnow().strftime("%Y-%m")
+
+    # Get the last modified date of the state file
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob("triggered_thresholds.json")
+    
+    if blob.exists():
+        blob.reload()  # Reload the file metadata
+        last_modified = blob.updated.strftime("%Y-%m")
+        
+        # If the current month is different from the last modified month, reset the state
+        if last_modified != current_month:
+            print("New month detected. Resetting state.")
+            triggered_thresholds = {}
+            update_triggered_thresholds(triggered_thresholds)
+        else:
+            print("Same month. No reset needed.")
+    else:
+        # If the file doesn't exist, create a new empty state
+        triggered_thresholds = {}
+        update_triggered_thresholds(triggered_thresholds)
+
+def billing_alert_to_slack(data, context):
+    try:
+        # Decode and parse the Pub/Sub message
+        if "data" not in data:
+            print("Error: No 'data' field found in Pub/Sub message")
+            return
+        
+        pubsub_message = base64.b64decode(data["data"]).decode("utf-8")
+        event = json.loads(pubsub_message)
+
+        # Set Project name manually
+        project_id = "project name"
+
+        # Extract cost and budget details
+        cost_amount = float(event.get("costAmount", 0))
+        budget_amount = float(event.get("budgetAmount", 0))
+        currency_code = event.get("currencyCode", "Unknown")
+        alert_threshold = float(event.get("alertThresholdExceeded", 0))
+        threshold_percentage = alert_threshold * 100
+
+        # Get already triggered thresholds
+        triggered_thresholds = get_triggered_thresholds()
+
+        # Get the current month
+        current_month = datetime.utcnow().strftime("%Y-%m")
+
+        # Initialize state for the current month if it doesn't exist
+        if current_month not in triggered_thresholds:
+            triggered_thresholds[current_month] = {}
+
+        # Create a unique key for the threshold and budget amount
+        threshold_key = f"{threshold_percentage}%_{budget_amount}"
+
+        # Check if the current threshold has already triggered for this month
+        if threshold_key in triggered_thresholds[current_month]:
+            print(f"Threshold {threshold_percentage:.2f}% for budget {budget_amount} already triggered this month. Skipping alert.")
+            return
+
+        # Check if the threshold percentage matches a predefined threshold
+        if any(abs(threshold_percentage - t) < 1e-5 for t in THRESHOLDS):
+            # Construct the Slack message with the updated format
+            slack_message = {
+                "text": f"⚠️ **Alert: Budget Threshold Exceeded!**\n"
+                        f"Project: {project_id}\n"
+                        f"Current Cost: {cost_amount} {currency_code}\n"
+                        f"Budget Amount: {budget_amount} {currency_code}\n"
+                        f"Threshold Crossed: {threshold_percentage:.2f}%\n"
+            }
+            print("Slack message:", slack_message)
+
+            # Send message to Slack
+            response = requests.post(SLACK_WEBHOOK_URL, json=slack_message)
+            response.raise_for_status()
+            print("Message sent to Slack successfully!")
+
+            # Update triggered thresholds with the new threshold and budget key
+            triggered_thresholds[current_month][threshold_key] = True
+            update_triggered_thresholds(triggered_thresholds)
+        else:
+            print(f"No alert needed. Current threshold percentage ({threshold_percentage:.2f}%) does not match predefined thresholds {THRESHOLDS}.")
+        
+    except Exception as e:
+        print(f"Error processing Pub/Sub message: {e}")
+
